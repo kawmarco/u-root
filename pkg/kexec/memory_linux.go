@@ -185,9 +185,9 @@ func (rs Ranges) FindSpaceIn(sz uint, limit Range) (start uintptr, err error) {
 }
 
 // Sort sorts ranges by their start point.
-func (rs *Ranges) Sort() {
-	sort.Slice(*rs, func(i, j int) bool {
-		return (*rs)[i].Start < (*rs)[j].Start
+func (rs Ranges) Sort() {
+	sort.Slice(rs, func(i, j int) bool {
+		return rs[i].Start < rs[j].Start
 	})
 }
 
@@ -219,7 +219,7 @@ func NewSegment(buf []byte, phys Range) Segment {
 }
 
 func (s Segment) String() string {
-	return fmt.Sprintf("(virt: %#x + %#x | phys: %#x + %#x)", s.Buf.Start, s.Buf.Size, s.Phys.Start, s.Phys.Size)
+	return fmt.Sprintf("(virt: %s, phys: %s)", s.Buf, s.Phys)
 }
 
 func ptrToSlice(ptr uintptr, size int) []byte {
@@ -282,10 +282,11 @@ func AlignPhys(s Segment) Segment {
 	s.Phys.Start = s.Phys.Start &^ uintptr(pageMask)
 
 	diff := orig - s.Phys.Start
+
 	// Round up to page size.
 	s.Phys.Size = alignUp(s.Phys.Size + uint(diff))
 
-	if s.Buf.Start < diff {
+	if s.Buf.Start < diff && diff > 0 {
 		panic("cannot have virtual memory address within first page")
 	}
 	s.Buf.Start -= diff
@@ -308,6 +309,18 @@ func (segs Segments) PhysContains(p uintptr) bool {
 		}
 	}
 	return false
+}
+
+// Insert inserts s assuming it does not overlap with an existing segment.
+func (segs *Segments) Insert(s Segment) {
+	*segs = append(*segs, s)
+	segs.sort()
+}
+
+func (segs Segments) sort() {
+	sort.Slice(segs, func(i, j int) bool {
+		return segs[i].Phys.Start < segs[j].Phys.Start
+	})
 }
 
 // Dedup deduplicates overlapping and merges adjacent segments in segs.
@@ -347,7 +360,7 @@ type Memory struct {
 	// Segments are the segments used to load a new operating system.
 	//
 	// Each segment also contains a physical memory region it maps to.
-	Segments []Segment
+	Segments Segments
 }
 
 // LoadElfSegments loads loadable ELF segments.
@@ -375,8 +388,7 @@ func (m *Memory) LoadElfSegments(r io.ReaderAt) error {
 			Start: uintptr(p.Paddr),
 			Size:  uint(p.Memsz),
 		})
-
-		m.Segments = append(m.Segments, s)
+		m.Segments.Insert(s)
 	}
 	return nil
 }
@@ -500,16 +512,27 @@ func (m Memory) FindSpace(sz uint) (start uintptr, err error) {
 	return m.AvailableRAM().FindSpaceAbove(sz, M1)
 }
 
-func (m *Memory) addKexecSegment(addr uintptr, d []byte) {
-	s := NewSegment(d, Range{
-		Start: addr,
-		Size:  uint(len(d)),
+// AddSegment adds s to the used segments in m without checking that the
+// segment falls within available RAM.
+func (m *Memory) AddSegment(s Segment) {
+	m.Segments.Insert(s)
+}
+
+// ReservePhys reserves sz bytes within limit addresses in the physical memmap.
+func (m *Memory) ReservePhys(sz uint, limit Range) (Range, error) {
+	sz = alignUp(sz)
+
+	start, err := m.AvailableRAM().FindSpaceIn(sz, limit)
+	if err != nil {
+		return Range{}, err
+	}
+
+	r := Range{Start: start, Size: sz}
+	m.Phys.Insert(TypedRange{
+		Range: r,
+		Type:  RangeReserved,
 	})
-	s = AlignPhys(s)
-	m.Segments = append(m.Segments, s)
-	sort.Slice(m.Segments, func(i, j int) bool {
-		return m.Segments[i].Phys.Start < m.Segments[j].Phys.Start
-	})
+	return r, nil
 }
 
 // AddKexecSegment adds d to a new kexec segment
@@ -519,7 +542,12 @@ func (m *Memory) AddKexecSegment(d []byte) (addr uintptr, err error) {
 	if err != nil {
 		return 0, err
 	}
-	m.addKexecSegment(start, d)
+
+	s := NewSegment(d, Range{
+		Start: start,
+		Size:  uint(len(d)),
+	})
+	m.Segments.Insert(s)
 	return start, nil
 }
 
@@ -607,4 +635,30 @@ func (m MemoryMap) FilterByType(typ RangeType) Ranges {
 		}
 	}
 	return rs
+}
+
+func (m MemoryMap) sort() {
+	sort.Slice(m, func(i, j int) bool {
+		return m[i].Start < m[j].Start
+	})
+}
+
+// Insert a new TypedRange into the memory map, removing chunks of other ranges
+// as necessary.
+//
+// Assumes that TypedRange is a valid range -- no checking.
+func (m *MemoryMap) Insert(r TypedRange) {
+	var newMap MemoryMap
+
+	// Remove points in r from all existing physical ranges.
+	for _, q := range *m {
+		split := q.Range.Minus(r.Range)
+		for _, r2 := range split {
+			newMap = append(newMap, TypedRange{Range: r2, Type: q.Type})
+		}
+	}
+
+	newMap = append(newMap, r)
+	newMap.sort()
+	*m = newMap
 }

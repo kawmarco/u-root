@@ -342,10 +342,5 @@ func (m *multiboot) addTrampoline() (entry uintptr, err error) {
 		return 0, err
 	}
 
-	addr, err := m.mem.AddKexecSegment(d)
-	if err != nil {
-		return 0, err
-	}
-
-	return addr, nil
+	return m.mem.AddKexecSegment(d)
 }

@@ -131,6 +131,17 @@ func TestAlignPhys(t *testing.T) {
 			},
 		},
 		{
+			name: "unaligned_size",
+			seg: Segment{
+				Buf:  Range{Start: 0x1000, Size: 0x1022},
+				Phys: Range{Start: 0x2000, Size: 0x1022},
+			},
+			want: Segment{
+				Buf:  Range{Start: 0x1000, Size: 0x1022},
+				Phys: Range{Start: 0x2000, Size: 0x2000},
+			},
+		},
+		{
 			name: "empty_buf",
 			seg: Segment{
 				Buf:  Range{Start: 0x1011, Size: 0},
@@ -569,6 +580,106 @@ func TestAdjacent(t *testing.T) {
 			}
 			if got2 != tt.want {
 				t.Errorf("%s.Adjacent(%s) = %v, want %v", tt.r2, tt.r1, got2, tt.want)
+			}
+		})
+	}
+}
+
+func TestMemoryMapInsert(t *testing.T) {
+	for i, tt := range []struct {
+		m    MemoryMap
+		r    TypedRange
+		want MemoryMap
+	}{
+		{
+			// r is entirely within m's one range.
+			m: MemoryMap{
+				TypedRange{Range: Range{Start: 0, Size: 0x2000}, Type: RangeRAM},
+			},
+			r: TypedRange{Range: Range{Start: 0x100, Size: 0x100}, Type: RangeReserved},
+			want: MemoryMap{
+				TypedRange{Range: Range{Start: 0, Size: 0x100}, Type: RangeRAM},
+				TypedRange{Range: Range{Start: 0x100, Size: 0x100}, Type: RangeReserved},
+				TypedRange{Range: Range{Start: 0x200, Size: 0x2000 - 0x200}, Type: RangeRAM},
+			},
+		},
+		{
+			// r sits across three RAM ranges.
+			m: MemoryMap{
+				TypedRange{Range: Range{Start: 0, Size: 0x150}, Type: RangeRAM},
+				TypedRange{Range: Range{Start: 0x150, Size: 0x50}, Type: RangeRAM},
+				TypedRange{Range: Range{Start: 0x1a0, Size: 0x100}, Type: RangeRAM},
+			},
+			r: TypedRange{Range: Range{Start: 0x100, Size: 0x100}, Type: RangeReserved},
+			want: MemoryMap{
+				TypedRange{Range: Range{Start: 0, Size: 0x100}, Type: RangeRAM},
+				TypedRange{Range: Range{Start: 0x100, Size: 0x100}, Type: RangeReserved},
+				TypedRange{Range: Range{Start: 0x200, Size: 0xa0}, Type: RangeRAM},
+			},
+		},
+		{
+			// r is a superset of the ranges in m.
+			m: MemoryMap{
+				TypedRange{Range: Range{Start: 0x100, Size: 0x50}, Type: RangeRAM},
+			},
+			r: TypedRange{Range: Range{Start: 0x100, Size: 0x100}, Type: RangeReserved},
+			want: MemoryMap{
+				TypedRange{Range: Range{Start: 0x100, Size: 0x100}, Type: RangeReserved},
+			},
+		},
+		{
+			// r is the first range in the map.
+			m: MemoryMap{},
+			r: TypedRange{Range: Range{Start: 0x100, Size: 0x100}, Type: RangeReserved},
+			want: MemoryMap{
+				TypedRange{Range: Range{Start: 0x100, Size: 0x100}, Type: RangeReserved},
+			},
+		},
+	} {
+		t.Run(fmt.Sprintf("test_%d", i), func(t *testing.T) {
+			// Make a copy for the Errorf print.
+			m := tt.m
+			tt.m.Insert(tt.r)
+
+			if !reflect.DeepEqual(tt.m, tt.want) {
+				t.Errorf("\n%v.Insert(%s) =\n%v, want\n%v", m, tt.r, tt.m, tt.want)
+			}
+		})
+	}
+}
+
+func TestSegmentsInsert(t *testing.T) {
+	for i, tt := range []struct {
+		segs Segments
+		s    Segment
+		want Segments
+	}{
+		{
+			segs: Segments{
+				Segment{Phys: Range{Start: 0x2000, Size: 0x20}},
+				Segment{Phys: Range{Start: 0x4000, Size: 0x20}},
+			},
+			s: Segment{Phys: Range{Start: 0x3000, Size: 0x20}},
+			want: Segments{
+				Segment{Phys: Range{Start: 0x2000, Size: 0x20}},
+				Segment{Phys: Range{Start: 0x3000, Size: 0x20}},
+				Segment{Phys: Range{Start: 0x4000, Size: 0x20}},
+			},
+		},
+		{
+			segs: Segments{},
+			s:    Segment{Phys: Range{Start: 0x3000, Size: 0x20}},
+			want: Segments{
+				Segment{Phys: Range{Start: 0x3000, Size: 0x20}},
+			},
+		},
+	} {
+		t.Run(fmt.Sprintf("test_%d", i), func(t *testing.T) {
+			before := tt.segs
+			tt.segs.Insert(tt.s)
+
+			if !reflect.DeepEqual(tt.segs, tt.want) {
+				t.Errorf("\n%v.Insert(%v) = \n%v, want \n%v", before, tt.s, tt.segs, tt.want)
 			}
 		})
 	}
